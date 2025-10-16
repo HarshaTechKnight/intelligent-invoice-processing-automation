@@ -1,0 +1,671 @@
+{
+  "name": "Intelligent Invoice Processing Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "has:attachment (subject:invoice OR subject:bill OR subject:payment OR subject:statement)",
+          "readStatus": "unread"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "6b74e86f-f98c-4604-9a8d-ee0b95d676d0",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1824,
+        80
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "DqAfUivOnM0K2Yan",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter only PDF and image attachments - Updated for Gmail header format\nconst items = [];\n\n// Helper function to extract value from header string\nfunction extractHeader(headerString) {\n  if (!headerString) return '';\n  // Remove prefix like \"Subject: \", \"From: \", etc.\n  const parts = headerString.split(': ');\n  return parts.length > 1 ? parts.slice(1).join(': ').trim() : headerString.trim();\n}\n\nfor (const item of $input.all()) {\n  // Get email metadata from headers\n  const headers = item.json.headers || {};\n  const emailId = item.json.id;\n  const emailSubject = extractHeader(headers.subject);\n  const emailFrom = extractHeader(headers.from);\n  const emailTo = extractHeader(headers.to);\n  const emailDate = extractHeader(headers.date);\n  \n  console.log('Processing email:', emailSubject);\n  console.log('From:', emailFrom);\n  console.log('Binary data available:', item.binary ? 'YES' : 'NO');\n  \n  // Check if there are binary attachments\n  if (!item.binary || Object.keys(item.binary).length === 0) {\n    console.log('WARNING: No attachments found. Make sure \"Download Attachments\" is enabled!');\n    continue;\n  }\n  \n  // Get all binary keys\n  const binaryKeys = Object.keys(item.binary);\n  console.log('Binary keys found:', binaryKeys);\n  \n  // Loop through all binary attachments\n  for (const key of binaryKeys) {\n    const attachment = item.binary[key];\n    \n    if (!attachment) {\n      console.log(`Skipping empty attachment: ${key}`);\n      continue;\n    }\n    \n    const fileName = attachment.fileName || key;\n    const mimeType = attachment.mimeType || '';\n    const fileSize = attachment.fileSize || 0;\n    \n    console.log(`Checking: ${fileName} (${mimeType}, ${fileSize} bytes)`);\n    \n    // Check if it's a PDF or image\n    const isPDF = mimeType.includes('pdf') || /\\.pdf$/i.test(fileName);\n    const isImage = mimeType.includes('image') || /\\.(png|jpg|jpeg|gif|bmp|tiff)$/i.test(fileName);\n    \n    if (isPDF || isImage) {\n      console.log(`✓ Valid invoice attachment: ${fileName}`);\n      \n      items.push({\n        json: {\n          emailId: emailId,\n          emailSubject: emailSubject,\n          emailFrom: emailFrom,\n          emailTo: emailTo,\n          emailDate: emailDate,\n          fileName: fileName,\n          mimeType: mimeType,\n          fileSize: fileSize,\n          attachmentKey: key,\n          fileType: isPDF ? 'pdf' : 'image'\n        },\n        binary: {\n          data: attachment\n        }\n      });\n    } else {\n      console.log(`✗ Skipping non-invoice file: ${fileName}`);\n    }\n  }\n}\n\n// Handle no attachments found\nif (items.length === 0) {\n  const firstItem = $input.first();\n  const headers = firstItem.json.headers || {};\n  \n  console.log('No PDF or image attachments found');\n  \n  return [{\n    json: {\n      message: 'No invoice attachments found',\n      emailSubject: extractHeader(headers.subject),\n      emailFrom: extractHeader(headers.from),\n      hasBinaryData: !!firstItem.binary,\n      binaryKeys: firstItem.binary ? Object.keys(firstItem.binary) : []\n    }\n  }];\n}\n\nconsole.log(`✓ Successfully found ${items.length} invoice attachment(s)`);\nreturn items;"
+      },
+      "id": "edf7c5d9-6651-4088-8ae0-15ea848d4599",
+      "name": "Filter Invoice Attachments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1616,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.fileName }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "509ed6a5-52af-451c-a0f0-24c18900f6e1",
+      "name": "Has Valid Attachments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -1424,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "maxOutputTokens": 2048,
+          "temperature": 0.1,
+          "topP": 0.95
+        }
+      },
+      "id": "58b4901b-2e9e-4382-9e8c-d4d569d05c83",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        -1280,
+        352
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "4Zi2PCCSrTYySX1T",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agent": "conversationalAgent",
+        "promptType": "define",
+        "text": "=You are analyzing invoice text extracted from a PDF document. Extract the following information and return it as a JSON object.\n\n=== EXTRACTED INVOICE TEXT ===\n{{ $json.text }}\n\n=== END OF INVOICE TEXT ===\n\nBased on the text above, return ONLY this JSON (no markdown, no explanation):\n\n{\n  \"invoice_number\": \"string\",\n  \"invoice_date\": \"YYYY-MM-DD\",\n  \"due_date\": \"YYYY-MM-DD\",\n  \"vendor_name\": \"string\",\n  \"vendor_email\": \"string or null\",\n  \"customer_name\": \"string\",\n  \"subtotal\": 0.00,\n  \"tax_amount\": 0.00,\n  \"total_amount\": 0.00,\n  \"currency\": \"USD\",\n  \"payment_terms\": \"string or null\"\n}\n\nCRITICAL RULES:\n1. Return ONLY the JSON object\n2. Start with { and end with }\n3. NO markdown code blocks\n4. Use null for missing fields\n5. Dates in YYYY-MM-DD format\n6. Numbers without $ symbols\n\nEmail context:\n- From: {{ $('Filter Invoice Attachments').item.json.emailFrom }}\n- Subject: {{ $('Filter Invoice Attachments').item.json.emailSubject }}\n- File: {{ $('Filter Invoice Attachments').item.json.fileName }}",
+        "options": {
+          "systemMessage": "You are an expert invoice data extraction AI. Extract data from the provided text and return ONLY valid JSON. Never add explanations or markdown formatting.",
+          "maxIterations": 30
+        }
+      },
+      "id": "addd0176-e9cc-4540-bdc2-d9ee40947baf",
+      "name": "AI Agent - Extract Invoice Data",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        -1200,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Clean and parse AI response to valid JSON\nlet response =  $input.first().json.output|| $json.text || JSON.stringify($json);\n\nconsole.log('=== RAW AI RESPONSE ===');\nconsole.log(response.substring(0, 500)); // Show first 500 chars\n\n// Clean up common issues\nresponse = response.trim();\n\n// Remove markdown code blocks if present\nresponse = response.replace(/```json\\n?/gi, '');\nresponse = response.replace(/```\\n?/g, '');\n\n// Remove any text before first { or after last }\nconst firstBrace = response.indexOf('{');\nconst lastBrace = response.lastIndexOf('}');\n\nif (firstBrace !== -1 && lastBrace !== -1) {\n  response = response.substring(firstBrace, lastBrace + 1);\n} else {\n  console.error('❌ No valid JSON braces found in response');\n  return [{\n    json: {\n      parseError: true,\n      errorMessage: 'No valid JSON structure found',\n      rawResponse: response.substring(0, 1000),\n      originalEmail: {\n        id: $('Filter Invoice Attachments').first().json.emailId,\n        subject: $('Filter Invoice Attachments').first().json.emailSubject,\n        from: $('Filter Invoice Attachments').first().json.emailFrom,\n        fileName: $('Filter Invoice Attachments').first().json.fileName\n      }\n    }\n  }];\n}\n\n// Try to parse JSON\ntry {\n  const data = JSON.parse(response);\n  console.log('✓ Successfully parsed invoice data');\n  console.log('Invoice Number:', data.invoice_number);\n  console.log('Vendor:', data.vendor_name);\n  console.log('Total:', data.total_amount, data.currency);\n  \n  return [{\n    json: {\n      ...data,\n      originalEmail: {\n        id: $('Filter Invoice Attachments').item.json.emailId,\n        subject: $('Filter Invoice Attachments').item.json.emailSubject,\n        from: $('Filter Invoice Attachments').item.json.emailFrom,\n        date: $('Filter Invoice Attachments').item.json.emailDate,\n        fileName: $('Filter Invoice Attachments').item.json.fileName\n      }\n    }\n  }];\n  \n} catch (error) {\n  console.error('❌ JSON Parse Error:', error.message);\n  console.error('Problematic JSON:', response.substring(0, 500));\n  \n  // Return error for manual review\n  return [{\n    json: {\n      parseError: true,\n      errorMessage: error.message,\n      rawResponse: response,\n      originalEmail: {\n        id: $('Filter Invoice Attachments').item.json.emailId,\n        subject: $('Filter Invoice Attachments').item.json.emailSubject,\n        from: $('Filter Invoice Attachments').item.json.emailFrom,\n        fileName: $('Filter Invoice Attachments').item.json.fileName\n      }\n    }\n  }];\n}"
+      },
+      "id": "6a33fa10-14be-4cbe-99e3-340fbf388750",
+      "name": "Parse AI JSON Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and enrich extracted invoice data\n\n// Check for parse errors first\nif ($json.parseError) {\n  console.error('Parse error detected, returning invalid result');\n  return [{\n    json: {\n      validation: {\n        isValid: false,\n        errors: ['AI failed to extract data: ' + $json.errorMessage],\n        warnings: ['Raw response: ' + ($json.rawResponse || '').substring(0, 200)]\n      },\n      originalEmail: $json.originalEmail\n    }\n  }];\n}\n\nconst extractedData = $json;\n\n// Validation results\nconst validation = {\n  isValid: true,\n  errors: [],\n  warnings: []\n};\n\n// Required field validation\nconst requiredFields = {\n  'invoice_number': 'Invoice Number',\n  'invoice_date': 'Invoice Date',\n  'vendor_name': 'Vendor Name',\n  'total_amount': 'Total Amount',\n  'currency': 'Currency'\n};\n\nfor (const [field, label] of Object.entries(requiredFields)) {\n  if (!extractedData[field]) {\n    validation.isValid = false;\n    validation.errors.push(`Missing required field: ${label}`);\n  }\n}\n\n// Date validation and parsing\nconst validateDate = (dateStr, fieldName) => {\n  if (!dateStr) return null;\n  \n  const date = new Date(dateStr);\n  if (isNaN(date.getTime())) {\n    validation.errors.push(`Invalid date format for ${fieldName}: ${dateStr}`);\n    validation.isValid = false;\n    return null;\n  }\n  return date;\n};\n\nconst invoiceDate = validateDate(extractedData.invoice_date, 'invoice_date');\nconst dueDate = validateDate(extractedData.due_date, 'due_date');\n\n// Amount validation\nlet totalAmount = extractedData.total_amount;\nif (totalAmount !== null && totalAmount !== undefined) {\n  totalAmount = parseFloat(totalAmount);\n  if (isNaN(totalAmount) || totalAmount <= 0) {\n    validation.errors.push(`Invalid total amount: ${extractedData.total_amount}`);\n    validation.isValid = false;\n  }\n} else {\n  validation.isValid = false;\n  validation.errors.push('Total amount is missing');\n}\n\n// Calculate days until due\nlet daysUntilDue = null;\nlet urgencyLevel = 'normal';\n\nif (dueDate) {\n  const now = new Date();\n  now.setHours(0, 0, 0, 0); // Reset time for accurate day calculation\n  dueDate.setHours(0, 0, 0, 0);\n  \n  daysUntilDue = Math.ceil((dueDate - now) / (1000 * 60 * 60 * 24));\n  \n  if (daysUntilDue < 0) {\n    urgencyLevel = 'overdue';\n    validation.warnings.push(`Invoice is ${Math.abs(daysUntilDue)} days OVERDUE!`);\n  } else if (daysUntilDue === 0) {\n    urgencyLevel = 'critical';\n    validation.warnings.push('Invoice is due TODAY!');\n  } else if (daysUntilDue <= 3) {\n    urgencyLevel = 'critical';\n    validation.warnings.push(`Invoice due in ${daysUntilDue} days`);\n  } else if (daysUntilDue <= 7) {\n    urgencyLevel = 'high';\n  } else if (daysUntilDue <= 14) {\n    urgencyLevel = 'medium';\n  }\n} else {\n  validation.warnings.push('No due date specified');\n}\n\n// Amount-based urgency\nlet amountUrgency = 'normal';\nif (totalAmount > 10000) {\n  amountUrgency = 'high';\n  validation.warnings.push('High-value invoice (>$10,000)');\n} else if (totalAmount > 5000) {\n  amountUrgency = 'medium';\n  validation.warnings.push('Medium-value invoice (>$5,000)');\n}\n\n// Combined urgency (use highest)\nconst urgencyPriority = {\n  'overdue': 5,\n  'critical': 4,\n  'high': 3,\n  'medium': 2,\n  'normal': 1\n};\n\nconst finalUrgency = urgencyPriority[urgencyLevel] >= urgencyPriority[amountUrgency]\n  ? urgencyLevel \n  : amountUrgency;\n\n// Log validation summary\nconsole.log('=== VALIDATION SUMMARY ===');\nconsole.log('Valid:', validation.isValid);\nconsole.log('Errors:', validation.errors.length);\nconsole.log('Warnings:', validation.warnings.length);\nconsole.log('Urgency:', finalUrgency);\nconsole.log('Days Until Due:', daysUntilDue);\n\nreturn [{\n  json: {\n    // All extracted fields\n    invoice_number: extractedData.invoice_number,\n    invoice_date: extractedData.invoice_date,\n    due_date: extractedData.due_date,\n    vendor_name: extractedData.vendor_name,\n    vendor_email: extractedData.vendor_email,\n    vendor_address: extractedData.vendor_address,\n    customer_name: extractedData.customer_name,\n    customer_address: extractedData.customer_address,\n    subtotal: extractedData.subtotal,\n    tax_amount: extractedData.tax_amount,\n    total_amount: totalAmount,\n    currency: extractedData.currency,\n    line_items: extractedData.line_items || [],\n    payment_terms: extractedData.payment_terms,\n    notes: extractedData.notes,\n    \n    // Enriched data\n    validation,\n    daysUntilDue,\n    urgencyLevel: finalUrgency,\n    amountUrgency,\n    processedDate: new Date().toISOString(),\n    \n    // Original email reference\n    originalEmail: extractedData.originalEmail\n  }\n}];"
+      },
+      "id": "020e1e49-0268-445c-8d0c-561c0611e82d",
+      "name": "Validate & Enrich Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.validation.isValid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "78f37cc5-a6b3-48fb-9728-1cc1bd98afc2",
+      "name": "Validation Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -464,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1GitT--icXUXcdM2669Y8wcnZMK6evNcgYvSxbdyKNyg",
+          "mode": "list",
+          "cachedResultName": "Invoice_Processing",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1GitT--icXUXcdM2669Y8wcnZMK6evNcgYvSxbdyKNyg/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1GitT--icXUXcdM2669Y8wcnZMK6evNcgYvSxbdyKNyg/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "invoice_number"
+          ],
+          "schema": [
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "invoice_date",
+              "displayName": "invoice_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "due_date",
+              "displayName": "due_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "vendor_name",
+              "displayName": "vendor_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "vendor_email",
+              "displayName": "vendor_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "customer_name",
+              "displayName": "customer_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subtotal",
+              "displayName": "subtotal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "tax_amount",
+              "displayName": "tax_amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "total_amount",
+              "displayName": "total_amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "line_items",
+              "displayName": "line_items",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payment_terms",
+              "displayName": "payment_terms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "validation",
+              "displayName": "validation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "daysUntilDue",
+              "displayName": "daysUntilDue",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "urgencyLevel",
+              "displayName": "urgencyLevel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "amountUrgency",
+              "displayName": "amountUrgency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "processedDate",
+              "displayName": "processedDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "originalEmail",
+              "displayName": "originalEmail",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "53dcdc2c-d385-4aa8-bae0-edc79deb2407",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -240,
+        -32
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "QCMSlDYAJlMLISOp",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.total_amount }}",
+              "rightValue": 5000,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "id": "5d9a3499-fdde-4194-81fa-b500b555fa38"
+            },
+            {
+              "leftValue": "={{ $json.urgencyLevel }}",
+              "rightValue": "critical,overdue",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              },
+              "id": "0147e7b8-2546-4c53-9642-8a232113f3a6"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8d300dbb-3b8c-4dcd-b70e-9333d04345b8",
+      "name": "High Priority?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "admin@yourcompany.com",
+        "subject": "⚠️ Invoice Email Without Valid Attachments",
+        "message": "⚠️ Invoice Email Without Valid Attachments",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -1648,
+        320
+      ],
+      "id": "1a477e99-caf4-4352-98e9-8a52c945b78b",
+      "name": "Error Message",
+      "webhookId": "cf0d433b-6dbf-430a-b30b-eefdfe9c46f2",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "DqAfUivOnM0K2Yan",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -1216,
+        -16
+      ],
+      "id": "97b9e0c3-6bc6-42f4-bde2-e9abb03ae02f",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "sendTo": "sriharsha0413@gmail.com",
+        "subject": "=📋 New Invoice Processed: {{ $json.vendor_name }}",
+        "message": "=Email Type: Text\n\nMessage:\nNew Invoice Received\n\nInvoice Number: {{ $json.invoice_number }}\nVendor: {{ $json.vendor_name }}\nAmount: {{ $json.currency }} {{ $json.total_amount }}\nDue Date: {{ $json.due_date }}\n\nPlease review and process.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -192,
+        464
+      ],
+      "id": "7274b8c1-563b-4069-af1b-a01aba51178d",
+      "name": "Normal notification",
+      "webhookId": "0bb7ac82-a2a7-4d02-8cb5-3dde874d9ab6",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "DqAfUivOnM0K2Yan",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "sriharsha0413@gmail.com",
+        "subject": "=🚨 URGENT: High-Priority Invoice - {{ $json.vendor_name }}",
+        "message": "=Email Type: Text  Message: New Invoice Received  Invoice Number: {{ $json.invoice_number }} Vendor: {{ $json.vendor_name }} Amount: {{ $json.currency }} {{ $json.total_amount }} Due Date: {{ $json.due_date }}  Please review and process.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        32,
+        144
+      ],
+      "id": "595121e5-54ee-4606-82b0-f84615fbd124",
+      "name": "Sent Urgent Notification",
+      "webhookId": "1f9d62ba-1eae-4d15-a8dd-7bca889e3a61",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "DqAfUivOnM0K2Yan",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Filter Invoice Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Invoice Attachments": {
+      "main": [
+        [
+          {
+            "node": "Has Valid Attachments?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Valid Attachments?": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent - Extract Invoice Data",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent - Extract Invoice Data": {
+      "main": [
+        [
+          {
+            "node": "Parse AI JSON Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI JSON Response": {
+      "main": [
+        [
+          {
+            "node": "Validate & Enrich Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Enrich Data": {
+      "main": [
+        [
+          {
+            "node": "Validation Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validation Passed?": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Log to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "High Priority?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High Priority?": {
+      "main": [
+        [
+          {
+            "node": "Sent Urgent Notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normal notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "AI Agent - Extract Invoice Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normal notification": {
+      "main": [
+        []
+      ]
+    },
+    "Sent Urgent Notification": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "68928f48-6555-4875-aaec-1c343cefcc6e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ccf417a0d70b100f87aef75481c4be37d0f1aeff6897db626e76318791226860"
+  },
+  "id": "uretnX0xAd3Nj3z0",
+  "tags": []
+}
