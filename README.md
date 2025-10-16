@@ -1,5 +1,9 @@
 # 🤖 Intelligent Invoice Processing Workflow for n8n
 
+## Screenshot:
+<img width="1366" height="599" alt="image" src="https://github.com/user-attachments/assets/241dc97e-e7f1-48e3-a4a5-16fe23e1249a" />
+
+
 [![n8n](https://img.shields.io/badge/n8n-v1.0+-orange.svg)](https://n8n.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/yourusername/invoice-processing-n8n/graphs/commit-activity)
